@@ -10,9 +10,9 @@ import concurrent.futures
 from datetime import datetime
 import json
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'zukomd-secret-key-2024')
 
 # Supported platforms
@@ -35,7 +35,6 @@ SUPPORTED_PLATFORMS = {
 def clean_url(url):
     """Clean and normalize URL"""
     parsed = urlparse(url)
-    # Remove tracking parameters
     query_params = {}
     if parsed.query:
         for param in parsed.query.split('&'):
@@ -43,7 +42,6 @@ def clean_url(url):
                 key, value = param.split('=', 1)
                 if key in ['v', 'id', 'url', 'src']:
                     query_params[key] = value
-    # Reconstruct URL without unnecessary parameters
     cleaned = parsed._replace(query='&'.join([f"{k}={v}" for k, v in query_params.items()]) if query_params else '')
     return urlunparse(cleaned)
 
@@ -74,38 +72,20 @@ def download_video(url, platform):
             'verbose': False,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
             }
         }
-        
-        # Platform-specific configurations
-        if platform == 'instagram':
-            ydl_opts.update({
-                'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
-            })
-        elif platform == 'tiktok':
-            ydl_opts['http_headers'].update({
-                'Referer': 'https://www.tiktok.com/',
-            })
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             if not info:
                 return None, "Failed to extract video information"
             
-            # Find the downloaded file
             downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(('.mp4', '.webm', '.mkv', '.avi'))]
             if not downloaded_files:
                 return None, "No video file found after download"
             
             video_path = os.path.join(temp_dir, downloaded_files[0])
             
-            # Get video metadata
             metadata = {
                 'title': info.get('title', 'Unknown'),
                 'duration': info.get('duration', 0),
@@ -146,7 +126,6 @@ def get_video_info(url):
                 'platform': detect_platform(url)
             }
             
-            # Get available formats
             if 'formats' in info:
                 for fmt in info['formats']:
                     if fmt.get('ext') in ['mp4', 'webm', 'm4a']:
@@ -177,15 +156,11 @@ def get_info():
         if not url:
             return jsonify({'error': 'URL is required'}), 400
         
-        # Clean URL
         url = clean_url(url)
-        
-        # Detect platform
         platform = detect_platform(url)
         if not platform:
-            return jsonify({'error': 'Unsupported platform. Supported: ' + ', '.join(SUPPORTED_PLATFORMS.keys())}), 400
+            return jsonify({'error': 'Unsupported platform'}), 400
         
-        # Get video info
         info, error = get_video_info(url)
         if error:
             return jsonify({'error': error}), 500
@@ -209,23 +184,18 @@ def download():
         if not url:
             return jsonify({'error': 'URL is required'}), 400
         
-        # Clean URL
         url = clean_url(url)
-        
-        # Detect platform
         platform = detect_platform(url)
         if not platform:
             return jsonify({'error': 'Unsupported platform'}), 400
         
-        # Download video
         video_path, result = download_video(url, platform)
         
-        if isinstance(result, str):  # Error message
+        if isinstance(result, str):
             return jsonify({'error': result}), 500
         
         metadata = result
         
-        # Send file
         return send_file(
             video_path,
             as_attachment=True,
@@ -236,57 +206,12 @@ def download():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/batch-download', methods=['POST'])
-def batch_download():
-    try:
-        data = request.json
-        urls = data.get('urls', [])
-        
-        if not urls or len(urls) == 0:
-            return jsonify({'error': 'URLs are required'}), 400
-        
-        if len(urls) > 10:
-            return jsonify({'error': 'Maximum 10 URLs allowed'}), 400
-        
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_url = {executor.submit(download_video, clean_url(url), detect_platform(url)): url for url in urls[:5]}
-            
-            for future in concurrent.futures.as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    video_path, result = future.result()
-                    if video_path:
-                        results.append({
-                            'url': url,
-                            'success': True,
-                            'filename': os.path.basename(video_path) if video_path else 'Unknown'
-                        })
-                    else:
-                        results.append({
-                            'url': url,
-                            'success': False,
-                            'error': result
-                        })
-                except Exception as e:
-                    results.append({
-                        'url': url,
-                        'success': False,
-                        'error': str(e)
-                    })
-        
-        return jsonify({
-            'success': True,
-            'results': results
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/health')
 def health():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
