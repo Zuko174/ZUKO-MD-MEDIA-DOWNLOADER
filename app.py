@@ -1,18 +1,11 @@
 from flask import Flask, render_template, request, jsonify, send_file
-from flask_cors import CORS
 import os
-import re
-import requests
 import tempfile
 import yt_dlp
-from urllib.parse import urlparse, urlunparse
-import concurrent.futures
+from urllib.parse import urlparse
 from datetime import datetime
-import json
 
-app = Flask(__name__, static_folder='.', static_url_path='')
-CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'zukomd-secret-key-2024')
 
 # Supported platforms
@@ -24,26 +17,9 @@ SUPPORTED_PLATFORMS = {
     'twitter': ['twitter.com', 'x.com'],
     'pinterest': ['pinterest.com'],
     'reddit': ['reddit.com'],
-    'likee': ['likee.video'],
-    'snapchat': ['snapchat.com'],
-    'linkedin': ['linkedin.com'],
-    'threads': ['threads.net'],
     'dailymotion': ['dailymotion.com'],
     'vimeo': ['vimeo.com']
 }
-
-def clean_url(url):
-    """Clean and normalize URL"""
-    parsed = urlparse(url)
-    query_params = {}
-    if parsed.query:
-        for param in parsed.query.split('&'):
-            if '=' in param:
-                key, value = param.split('=', 1)
-                if key in ['v', 'id', 'url', 'src']:
-                    query_params[key] = value
-    cleaned = parsed._replace(query='&'.join([f"{k}={v}" for k, v in query_params.items()]) if query_params else '')
-    return urlunparse(cleaned)
 
 def detect_platform(url):
     """Detect which social media platform the URL belongs to"""
@@ -54,8 +30,8 @@ def detect_platform(url):
                 return platform
     return None
 
-def download_video(url, platform):
-    """Download video using appropriate method for each platform"""
+def download_video(url):
+    """Download video using yt-dlp"""
     try:
         temp_dir = tempfile.mkdtemp()
         output_template = os.path.join(temp_dir, '%(title)s.%(ext)s')
@@ -65,50 +41,44 @@ def download_video(url, platform):
             'format': 'best',
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
-            'force_generic_extractor': True,
-            'no_check_certificate': True,
-            'ignoreerrors': True,
-            'verbose': False,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            
             if not info:
                 return None, "Failed to extract video information"
             
-            downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(('.mp4', '.webm', '.mkv', '.avi'))]
+            # Find downloaded file
+            downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(('.mp4', '.webm', '.mkv'))]
             if not downloaded_files:
-                return None, "No video file found after download"
+                return None, "No video file found"
             
             video_path = os.path.join(temp_dir, downloaded_files[0])
             
             metadata = {
-                'title': info.get('title', 'Unknown'),
+                'title': info.get('title', 'Video'),
                 'duration': info.get('duration', 0),
                 'thumbnail': info.get('thumbnail', ''),
                 'uploader': info.get('uploader', 'Unknown'),
-                'platform': platform,
                 'filename': downloaded_files[0],
-                'filesize': os.path.getsize(video_path) if os.path.exists(video_path) else 0
+                'filesize': os.path.getsize(video_path)
             }
             
             return video_path, metadata
             
     except Exception as e:
-        return None, f"Error downloading video: {str(e)}"
+        return None, f"Error: {str(e)}"
 
 def get_video_info(url):
-    """Get video information without downloading"""
+    """Get video information"""
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
-            'force_generic_extractor': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -118,30 +88,28 @@ def get_video_info(url):
                 return None, "Failed to get video information"
             
             metadata = {
-                'title': info.get('title', 'Unknown'),
+                'title': info.get('title', 'Video'),
                 'duration': info.get('duration', 0),
                 'thumbnail': info.get('thumbnail', ''),
                 'uploader': info.get('uploader', 'Unknown'),
-                'formats': [],
-                'platform': detect_platform(url)
+                'formats': []
             }
             
+            # Get available formats
             if 'formats' in info:
-                for fmt in info['formats']:
-                    if fmt.get('ext') in ['mp4', 'webm', 'm4a']:
-                        format_info = {
-                            'format_id': fmt.get('format_id'),
-                            'ext': fmt.get('ext'),
+                for fmt in info['formats'][:10]:  # Limit to 10 formats
+                    if fmt.get('ext') in ['mp4', 'webm']:
+                        metadata['formats'].append({
+                            'format_id': fmt.get('format_id', 'best'),
+                            'ext': fmt.get('ext', 'mp4'),
                             'resolution': fmt.get('resolution', 'N/A'),
-                            'filesize': fmt.get('filesize', 0),
-                            'note': fmt.get('format_note', ''),
-                        }
-                        metadata['formats'].append(format_info)
+                            'filesize': fmt.get('filesize', 0)
+                        })
             
             return metadata, None
             
     except Exception as e:
-        return None, f"Error getting video info: {str(e)}"
+        return None, f"Error: {str(e)}"
 
 @app.route('/')
 def index():
@@ -156,7 +124,6 @@ def get_info():
         if not url:
             return jsonify({'error': 'URL is required'}), 400
         
-        url = clean_url(url)
         platform = detect_platform(url)
         if not platform:
             return jsonify({'error': 'Unsupported platform'}), 400
@@ -179,19 +146,13 @@ def download():
     try:
         data = request.json
         url = data.get('url', '').strip()
-        format_id = data.get('format_id', 'best')
         
         if not url:
             return jsonify({'error': 'URL is required'}), 400
         
-        url = clean_url(url)
-        platform = detect_platform(url)
-        if not platform:
-            return jsonify({'error': 'Unsupported platform'}), 400
+        video_path, result = download_video(url)
         
-        video_path, result = download_video(url, platform)
-        
-        if isinstance(result, str):
+        if isinstance(result, str):  # Error
             return jsonify({'error': result}), 500
         
         metadata = result
@@ -208,10 +169,8 @@ def download():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+    return jsonify({'status': 'ok', 'time': datetime.now().isoformat()})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
